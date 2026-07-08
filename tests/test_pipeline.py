@@ -113,10 +113,79 @@ def test_transform_reports_are_persisted():
         rows = con.execute("SELECT city, simulated, temp_outliers, "
                            "duplicates_dropped FROM transform_reports").fetchall()
         run_row = con.execute("SELECT simulated FROM runs").fetchone()
+        q = con.execute("SELECT field, original_value, issue "
+                        "FROM quarantine ORDER BY field").fetchall()
         con.close()
         assert rows == [("testville", True, 1, 1)]
         assert run_row == (True,)
-        print("persistence OK:", rows)
+        # quarantine preserves the ORIGINAL bad values, e.g. the -999 sentinel
+        assert any("-999" in orig for _, orig, _ in q)
+        assert len(q) == len(report["quarantine_records"])
+        print("persistence OK:", rows, "| quarantine rows:", len(q))
+
+
+def test_migrations_do_not_reset_existing_flags():
+    # regression: DuckDB's ADD COLUMN IF NOT EXISTS silently resets an
+    # existing column to its default, wiping simulated/interpolated flags
+    # on every later run — migrations must check the schema first
+    df, report = transform.clean(MESSY_RAW)
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "test.duckdb")
+        report["rows_inserted"] = load.upsert(df, db)
+        summary = {
+            "run_at": dt.datetime.now(), "cities": ["testville"],
+            "rows_inserted": report["rows_inserted"], "checks_passed": 6,
+            "checks_total": 6, "ok": True, "simulated": True,
+            "reports": [report],
+        }
+        pipeline._record_run(db, summary)
+        # a second, non-simulated run re-executes every migration path
+        summary2 = {**summary, "run_at": dt.datetime.now(), "simulated": False}
+        load.upsert(df, db)
+        pipeline._record_run(db, summary2)
+        con = duckdb.connect(db, read_only=True)
+        flags = con.execute(
+            "SELECT simulated FROM runs ORDER BY run_at").fetchall()
+        interp = con.execute(
+            "SELECT COUNT(*) FROM weather_hourly WHERE interpolated").fetchone()[0]
+        con.close()
+        assert flags == [(True,), (False,)]      # first run's flag survives
+        assert interp == int(df["interpolated"].sum())
+        print("migration-safety OK:", flags)
+
+
+def test_cross_field_conflicts_are_flagged_not_fixed():
+    raw = _clean_payload(hours=6)
+    h = raw["hourly"]
+    h["precipitation"][2] = 12.0          # heavy rain...
+    h["relative_humidity_2m"][2] = 20     # ...in bone-dry air: contradiction
+    df, report = transform.clean(raw)
+    assert report["cross_field_flags"] == 1
+    # flagged but NOT modified — the pipeline never guesses which field is wrong
+    row = df[df["precipitation_mm"] == 12.0]
+    assert len(row) == 1 and row["humidity_pct"].iloc[0] == 20
+    q = [r for r in report["quarantine_records"] if "cross-field" in r["issue"]]
+    assert len(q) == 1 and "kept" in q[0]["action"]
+    print("cross-field OK:", q[0])
+
+
+def test_interpolated_values_are_lineage_flagged():
+    raw = _clean_payload(hours=6)
+    raw["hourly"]["temperature_2m"][3] = None      # one gap
+    df, report = transform.clean(raw)
+    assert report["gaps_interpolated"] == 1
+    assert df["interpolated"].sum() == 1           # exactly that row is flagged
+    assert not df.loc[~df["interpolated"], "temperature_c"].isna().any()
+    # the lineage flag survives the load into the warehouse
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "test.duckdb")
+        load.upsert(df, db)
+        con = duckdb.connect(db, read_only=True)
+        n = con.execute("SELECT COUNT(*) FROM weather_hourly "
+                        "WHERE interpolated").fetchone()[0]
+        con.close()
+        assert n == 1
+    print("lineage OK: 1 interpolated row flagged end-to-end")
 
 
 if __name__ == "__main__":
@@ -124,4 +193,7 @@ if __name__ == "__main__":
     test_load_is_idempotent_and_quality_passes()
     test_fault_injection_is_reproducible_and_cleaned()
     test_transform_reports_are_persisted()
+    test_migrations_do_not_reset_existing_flags()
+    test_cross_field_conflicts_are_flagged_not_fixed()
+    test_interpolated_values_are_lineage_flagged()
     print("\nAll tests passed ✅")

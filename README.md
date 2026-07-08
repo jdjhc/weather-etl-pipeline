@@ -25,10 +25,15 @@ Extract  →  Transform  →  Load  →  Data Quality  →  (Schedule)
    tidy table and fix real-world problems:
    - sentinel/out-of-range values (e.g. `-999` temperature) → removed
    - impossible humidity (`>100`), negative rainfall → corrected
-   - small gaps → interpolated
+   - cross-field inconsistencies (heavy rain + bone-dry air) → **flagged, not
+     auto-fixed** — when two fields disagree the pipeline never guesses
+   - small gaps → interpolated, and **lineage-flagged** in an `interpolated`
+     column so the warehouse always distinguishes measured from imputed values
    - duplicate timestamps → de-duplicated
    - timezone-aware, sorted
-   - returns a **report** of exactly what was fixed
+   - returns a **report** of exactly what was fixed, and writes every touched
+     value — with its original reading — to a **`quarantine` audit table**
+     (nothing is fixed silently)
 3. **Load** (`etl/load.py`) — write into a **DuckDB** warehouse. The load is
    **idempotent / incremental**: re-running only appends new `(city, ts)` rows,
    so daily runs never duplicate data (`ON CONFLICT DO NOTHING`).
@@ -87,10 +92,11 @@ streamlit run dashboard.py
 
 The cleaning panel reads the `transform_reports` table — every run persists a
 per-city report of exactly what the Transform stage fixed (sentinels,
-impossible humidity, negative rain, duplicates, interpolated gaps). Real API
-data is usually clean, so pair it with `--simulate-faults` to watch the
-pipeline catch injected faults; demo runs are clearly flagged 🧪 in the run
-history.
+impossible humidity, negative rain, cross-field conflicts, duplicates,
+interpolated gaps) — plus a **quarantine log** showing each touched value's
+original reading, the issue, and the action taken. Real API data is usually
+clean, so pair it with `--simulate-faults` to watch the pipeline catch
+injected faults; demo runs are clearly flagged 🧪 in the run history.
 
 Each city keeps a fixed color across all charts and filters; every chart has
 hover tooltips and the filtered data is also available as a table.

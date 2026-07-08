@@ -38,8 +38,8 @@ def load_weather() -> pd.DataFrame:
     con = duckdb.connect(DB_PATH, read_only=True)
     try:
         return con.execute(
-            "SELECT city, ts, temperature_c, humidity_pct, precipitation_mm "
-            "FROM weather_hourly ORDER BY ts"
+            "SELECT city, ts, temperature_c, humidity_pct, precipitation_mm, "
+            "interpolated FROM weather_hourly ORDER BY ts"
         ).fetchdf()
     finally:
         con.close()
@@ -62,6 +62,19 @@ def load_reports() -> pd.DataFrame:
             "SELECT * FROM transform_reports ORDER BY run_at DESC, city"
         ).fetchdf()
     except duckdb.CatalogException:      # warehouse predates the reports table
+        return pd.DataFrame()
+    finally:
+        con.close()
+
+
+@st.cache_data(ttl=60)
+def load_quarantine() -> pd.DataFrame:
+    con = duckdb.connect(DB_PATH, read_only=True)
+    try:
+        return con.execute(
+            "SELECT * FROM quarantine ORDER BY run_at DESC, city, ts"
+        ).fetchdf()
+    except duckdb.CatalogException:      # warehouse predates the quarantine table
         return pd.DataFrame()
     finally:
         con.close()
@@ -94,6 +107,7 @@ if not pathlib.Path(DB_PATH).exists():
             load_weather.clear()
             load_runs.clear()
             load_reports.clear()
+            load_quarantine.clear()
         except Exception as e:
             st.error(f"Pipeline bootstrap failed: {e}")
             st.stop()
@@ -224,6 +238,7 @@ FIX_COLS = {
     "temp_outliers": "Sentinel / out-of-range temp",
     "humidity_outliers": "Impossible humidity",
     "negative_rain_fixed": "Negative rain fixed",
+    "cross_field_flags": "Cross-field flags",
     "duplicates_dropped": "Duplicates dropped",
     "gaps_interpolated": "Gaps interpolated",
 }
@@ -250,6 +265,30 @@ else:
         [["City", "Rows in", *FIX_COLS.values(), "Rows out", "New rows loaded"]]
     )
     st.dataframe(latest_view, width="stretch", hide_index=True)
+
+    # quarantine log: the ORIGINAL value of every reading that was touched —
+    # nothing is fixed silently
+    quarantine = load_quarantine()
+    if not quarantine.empty:
+        q_latest = quarantine[quarantine["run_at"] == quarantine["run_at"].max()]
+        st.markdown("**Quarantine log** — every touched value, with its "
+                    "original reading, the issue, and the action taken:")
+        st.dataframe(
+            q_latest.rename(columns={
+                "city": "City", "ts": "Timestamp", "field": "Field",
+                "original_value": "Original value", "issue": "Issue",
+                "action": "Action taken",
+            })[["City", "Timestamp", "Field", "Original value",
+                "Issue", "Action taken"]],
+            width="stretch", hide_index=True, height=300,
+        )
+        interp_pct = weather["interpolated"].mean()
+        st.caption(f"Data lineage: `interpolated` column marks imputed readings "
+                   f"in the warehouse — currently {weather['interpolated'].sum()} "
+                   f"of {len(weather)} rows ({interp_pct:.1%}). Cross-field "
+                   f"conflicts are **flagged, not auto-fixed**: when two fields "
+                   f"disagree the pipeline can't know which one is wrong, so it "
+                   f"never guesses.")
 
 # ---- pipeline runs (audit trail) ---------------------------------------------
 st.divider()

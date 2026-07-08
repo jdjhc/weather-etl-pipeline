@@ -30,18 +30,23 @@ def inject(raw: dict, rate: float = 0.06, seed: int | None = None) -> tuple[dict
     hum = list(h.get("relative_humidity_2m") or [None] * n)
     rain = list(h.get("precipitation") or [0.0] * n)
 
-    report = {"sentinels": 0, "bad_humidity": 0, "neg_rain": 0, "dupes": 0}
+    report = {"sentinels": 0, "bad_humidity": 0, "neg_rain": 0,
+              "conflicts": 0, "dupes": 0}
     k = max(1, int(n * rate))
 
     for _ in range(k):
         i = rng.randrange(n)
-        kind = rng.choice(["sentinel", "humidity", "rain", "missing"])
+        kind = rng.choice(["sentinel", "humidity", "rain", "missing", "conflict"])
         if kind == "sentinel":
             temp[i] = -999.0; report["sentinels"] += 1
         elif kind == "humidity":
             hum[i] = rng.choice([150, -5, 999]); report["bad_humidity"] += 1
         elif kind == "rain":
             rain[i] = -rng.uniform(1, 5); report["neg_rain"] += 1
+        elif kind == "conflict":  # heavy rain + bone-dry air: fields disagree
+            rain[i] = round(rng.uniform(8, 20), 1)
+            hum[i] = round(rng.uniform(10, 35))
+            report["conflicts"] += 1
         else:  # missing
             temp[i] = None
 

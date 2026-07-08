@@ -13,6 +13,14 @@ from . import extract, transform, load, quality, faults
 log = logging.getLogger("etl.pipeline")
 
 
+def _add_column_if_missing(con, table, column, ddl):
+    """Safe migration. DuckDB's ADD COLUMN IF NOT EXISTS silently RESETS an
+    existing column to its default (observed in 1.5.4), so check first."""
+    cols = {r[1] for r in con.execute(f"PRAGMA table_info('{table}')").fetchall()}
+    if column not in cols:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def _record_run(db_path, summary):
     con = duckdb.connect(db_path)
     con.execute("""
@@ -23,14 +31,25 @@ def _record_run(db_path, summary):
         )
     """)
     # migrate warehouses created before the `simulated` column existed
-    con.execute(
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS simulated BOOLEAN DEFAULT FALSE")
+    _add_column_if_missing(con, "runs", "simulated", "BOOLEAN DEFAULT FALSE")
     con.execute("""
         CREATE TABLE IF NOT EXISTS transform_reports (
             run_at TIMESTAMP, city VARCHAR, simulated BOOLEAN,
             rows_in INTEGER, temp_outliers INTEGER, humidity_outliers INTEGER,
             negative_rain_fixed INTEGER, duplicates_dropped INTEGER,
-            gaps_interpolated INTEGER, rows_out INTEGER, rows_inserted INTEGER
+            gaps_interpolated INTEGER, rows_out INTEGER, rows_inserted INTEGER,
+            cross_field_flags INTEGER DEFAULT 0
+        )
+    """)
+    _add_column_if_missing(con, "transform_reports",
+                           "cross_field_flags", "INTEGER DEFAULT 0")
+    # quarantine: the original value of every reading the Transform stage
+    # touched — nothing is fixed silently
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS quarantine (
+            run_at TIMESTAMP, city VARCHAR, simulated BOOLEAN,
+            ts TIMESTAMP, field VARCHAR, original_value VARCHAR,
+            issue VARCHAR, action VARCHAR
         )
     """)
     con.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?)", [
@@ -39,12 +58,19 @@ def _record_run(db_path, summary):
         summary["checks_total"], summary["ok"], summary["simulated"],
     ])
     for r in summary["reports"]:
-        con.execute("INSERT INTO transform_reports VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
+        con.execute("INSERT INTO transform_reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [
             summary["run_at"], r["city"], summary["simulated"],
             r["rows_in"], r["temp_outliers"], r["humidity_outliers"],
             r["negative_rain_fixed"], r["duplicates_dropped"],
             r["gaps_interpolated"], r["rows_out"], r["rows_inserted"],
+            r["cross_field_flags"],
         ])
+        for q in r["quarantine_records"]:
+            con.execute("INSERT INTO quarantine VALUES (?,?,?,?,?,?,?,?)", [
+                summary["run_at"], r["city"], summary["simulated"],
+                q["ts"], q["field"], q["original_value"],
+                q["issue"], q["action"],
+            ])
     con.close()
 
 
