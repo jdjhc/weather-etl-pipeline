@@ -1,13 +1,13 @@
 # 🌦️ Weather ETL Pipeline
 
-**[▶ Live dashboard](https://weather-etl-pipeline.streamlit.app)** · built with
+**[▶ Live dashboard](https://weather-etl-pipeline-9t8ig8d9ewklztv2ompets.streamlit.app)** · built with
 Python, DuckDB and Streamlit
 
 A small but complete **data-engineering pipeline**: it ingests weather data
 from a public API, cleans it, loads it incrementally into a warehouse, and runs
 automated data-quality checks — on a daily schedule.
 
-[![Dashboard](docs/dashboard.png)](https://weather-etl-pipeline.streamlit.app)
+[![Dashboard](docs/dashboard.png)](https://weather-etl-pipeline-9t8ig8d9ewklztv2ompets.streamlit.app)
 
 Built to show the fundamentals of data engineering: **reliable, reproducible,
 monitored data**, not one-off analysis.
