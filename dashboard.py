@@ -54,6 +54,19 @@ def load_runs() -> pd.DataFrame:
         con.close()
 
 
+@st.cache_data(ttl=60)
+def load_reports() -> pd.DataFrame:
+    con = duckdb.connect(DB_PATH, read_only=True)
+    try:
+        return con.execute(
+            "SELECT * FROM transform_reports ORDER BY run_at DESC, city"
+        ).fetchdf()
+    except duckdb.CatalogException:      # warehouse predates the reports table
+        return pd.DataFrame()
+    finally:
+        con.close()
+
+
 def city_color_scale(cities: list[str]) -> alt.Scale:
     return alt.Scale(domain=cities, range=[CITY_COLORS[c] for c in cities])
 
@@ -72,8 +85,15 @@ if not pathlib.Path(DB_PATH).exists():
             from etl import pipeline
 
             pipeline.run(tuple(CITY_COLORS), past_days=7, db_path=DB_PATH)
+            # second pass with injected faults (clearly marked as a demo):
+            # it loads 0 new rows — the warehouse keeps only real data — but
+            # records what the Transform stage caught, so the cleaning panel
+            # below has something to show.
+            pipeline.run(tuple(CITY_COLORS), past_days=7, db_path=DB_PATH,
+                         simulate_faults=True)
             load_weather.clear()
             load_runs.clear()
+            load_reports.clear()
         except Exception as e:
             st.error(f"Pipeline bootstrap failed: {e}")
             st.stop()
@@ -196,6 +216,41 @@ with c2:
     )
     st.altair_chart(rain_chart, width="stretch")
 
+# ---- data cleaning (Transform stage) -----------------------------------------
+st.divider()
+st.subheader("Data cleaning (Transform stage)")
+reports = load_reports()
+FIX_COLS = {
+    "temp_outliers": "Sentinel / out-of-range temp",
+    "humidity_outliers": "Impossible humidity",
+    "negative_rain_fixed": "Negative rain fixed",
+    "duplicates_dropped": "Duplicates dropped",
+    "gaps_interpolated": "Gaps interpolated",
+}
+if reports.empty:
+    st.info("No cleaning reports yet — run the pipeline once "
+            "(`python run.py`, add `--simulate-faults` for a demo).")
+else:
+    latest = reports[reports["run_at"] == reports["run_at"].max()]
+    total_fixed = int(latest[list(FIX_COLS)].to_numpy().sum())
+    if bool(latest["simulated"].iloc[0]):
+        st.caption("🧪 Latest cleaning stats come from a **`--simulate-faults` demo "
+                   "run**: realistic sensor faults were injected before the "
+                   "Transform stage so you can see it work. Every injected fault "
+                   "was caught — only cleaned data reaches the warehouse.")
+    elif total_fixed == 0:
+        st.caption("✨ The source data in the latest run was already clean — "
+                   "run `python run.py --simulate-faults` to see the cleaning "
+                   "stage in action.")
+    st.metric("Issues caught & fixed in latest run", total_fixed)
+    latest_view = (
+        latest.rename(columns={"city": "City", "rows_in": "Rows in",
+                               "rows_out": "Rows out",
+                               "rows_inserted": "New rows loaded", **FIX_COLS})
+        [["City", "Rows in", *FIX_COLS.values(), "Rows out", "New rows loaded"]]
+    )
+    st.dataframe(latest_view, width="stretch", hide_index=True)
+
 # ---- pipeline runs (audit trail) ---------------------------------------------
 st.divider()
 st.subheader("Pipeline run history")
@@ -207,8 +262,13 @@ else:
         lambda r: f"{'✅' if r['ok'] else '❌'} {r['checks_passed']}/{r['checks_total']}",
         axis=1,
     )
+    if "simulated" in runs_view.columns:
+        runs_view["mode"] = runs_view["simulated"].map(
+            lambda s: "🧪 demo (faults)" if s else "live")
+    else:
+        runs_view["mode"] = "live"
     st.dataframe(
-        runs_view[["run_at", "cities", "rows_inserted", "data quality"]],
+        runs_view[["run_at", "cities", "rows_inserted", "data quality", "mode"]],
         width="stretch",
         hide_index=True,
     )

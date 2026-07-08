@@ -47,7 +47,15 @@ pip install -r requirements.txt
 
 python run.py                                   # Auckland, last 7 days
 python run.py --cities auckland wellington christchurch
+python run.py --simulate-faults                 # see the cleaning stage work (below)
 ```
+
+> **Why `--simulate-faults`?** A real weather API returns *clean* data, so the
+> cleaning counters read all zeros — which hides the whole point. This flag
+> injects a few realistic sensor faults (sentinels, impossible humidity,
+> negative rain, duplicate rows) *before* the Transform stage, so you can see
+> the pipeline catch and fix them. It's standard "chaos testing", off by
+> default so normal runs stay honest.
 
 Example output:
 
@@ -71,11 +79,18 @@ demonstrating the incremental load.
 
 A read-only **Streamlit dashboard** over the warehouse — temperature/humidity
 trends and daily rainfall per city, KPI tiles (row count, freshness, last-run
-data quality), and the `runs` audit trail:
+data quality), a **data-cleaning panel**, and the `runs` audit trail:
 
 ```bash
 streamlit run dashboard.py
 ```
+
+The cleaning panel reads the `transform_reports` table — every run persists a
+per-city report of exactly what the Transform stage fixed (sentinels,
+impossible humidity, negative rain, duplicates, interpolated gaps). Real API
+data is usually clean, so pair it with `--simulate-faults` to watch the
+pipeline catch injected faults; demo runs are clearly flagged 🧪 in the run
+history.
 
 Each city keeps a fixed color across all charts and filters; every chart has
 hover tooltips and the filtered data is also available as a table.

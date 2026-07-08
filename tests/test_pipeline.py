@@ -10,7 +10,11 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from etl import transform, load, quality
+import datetime as dt
+
+import duckdb
+
+from etl import transform, load, quality, faults, pipeline
 
 
 # a raw payload that mimics Open-Meteo but is full of real-world problems
@@ -58,7 +62,66 @@ def test_load_is_idempotent_and_quality_passes():
         print("load+quality OK: inserted", first, "then", second)
 
 
+def _clean_payload(hours=48):
+    start = dt.datetime(2026, 7, 1)
+    times = [(start + dt.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M")
+             for i in range(hours)]
+    return {
+        "_city": "testville",
+        "hourly": {
+            "time": times,
+            "temperature_2m": [10.0 + (i % 12) * 0.5 for i in range(hours)],
+            "relative_humidity_2m": [70 + (i % 20) for i in range(hours)],
+            "precipitation": [0.0] * hours,
+        },
+    }
+
+
+def test_fault_injection_is_reproducible_and_cleaned():
+    raw = _clean_payload()
+    corrupted, freport = faults.inject(raw, seed=42)
+    corrupted2, freport2 = faults.inject(raw, seed=42)
+    assert freport == freport2                     # same seed -> same faults
+    assert freport["injected"] > 0
+    assert raw["hourly"]["temperature_2m"][0] == 10.0   # original untouched
+
+    df, report = transform.clean(corrupted)
+    fixed = (report["temp_outliers"] + report["humidity_outliers"]
+             + report["negative_rain_fixed"] + report["duplicates_dropped"])
+    assert fixed > 0                               # transform caught faults
+    # nothing corrupted survives into the clean table
+    assert df["temperature_c"].dropna().between(-50, 60).all()
+    assert df["humidity_pct"].dropna().between(0, 100).all()
+    assert (df["precipitation_mm"] >= 0).all()
+    assert not df.duplicated(subset=["city", "ts"]).any()
+    print("faults OK:", freport, "->", report)
+
+
+def test_transform_reports_are_persisted():
+    df, report = transform.clean(MESSY_RAW)
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "test.duckdb")
+        report["rows_inserted"] = load.upsert(df, db)
+        summary = {
+            "run_at": dt.datetime.now(), "cities": ["testville"],
+            "rows_inserted": report["rows_inserted"], "checks_passed": 6,
+            "checks_total": 6, "ok": True, "simulated": True,
+            "reports": [report],
+        }
+        pipeline._record_run(db, summary)
+        con = duckdb.connect(db, read_only=True)
+        rows = con.execute("SELECT city, simulated, temp_outliers, "
+                           "duplicates_dropped FROM transform_reports").fetchall()
+        run_row = con.execute("SELECT simulated FROM runs").fetchone()
+        con.close()
+        assert rows == [("testville", True, 1, 1)]
+        assert run_row == (True,)
+        print("persistence OK:", rows)
+
+
 if __name__ == "__main__":
     test_transform_cleans_everything()
     test_load_is_idempotent_and_quality_passes()
+    test_fault_injection_is_reproducible_and_cleaned()
+    test_transform_reports_are_persisted()
     print("\nAll tests passed ✅")

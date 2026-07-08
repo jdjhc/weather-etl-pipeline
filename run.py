@@ -24,9 +24,13 @@ def main():
                     choices=list(extract.CITIES))
     ap.add_argument("--past-days", type=int, default=7)
     ap.add_argument("--db", default="warehouse.duckdb")
+    ap.add_argument("--simulate-faults", action="store_true",
+                    help="(demo) inject realistic sensor faults so the cleaning "
+                         "and quality stages have something to catch")
     args = ap.parse_args()
 
-    summary = pipeline.run(tuple(args.cities), args.past_days, args.db)
+    summary = pipeline.run(tuple(args.cities), args.past_days, args.db,
+                           simulate_faults=args.simulate_faults)
 
     print("\n=== RUN SUMMARY ===")
     print(f"Cities        : {', '.join(summary['cities'])}")
