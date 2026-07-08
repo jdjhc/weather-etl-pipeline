@@ -62,6 +62,19 @@ Status        : OK
 Run it again and `Rows inserted` drops to ~24 (only the new hours) —
 demonstrating the incremental load.
 
+### Dashboard
+
+A read-only **Streamlit dashboard** over the warehouse — temperature/humidity
+trends and daily rainfall per city, KPI tiles (row count, freshness, last-run
+data quality), and the `runs` audit trail:
+
+```bash
+streamlit run dashboard.py
+```
+
+Each city keeps a fixed color across all charts and filters; every chart has
+hover tooltips and the filtered data is also available as a table.
+
 ### Daily schedule
 
 ```bash
