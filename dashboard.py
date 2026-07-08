@@ -7,6 +7,7 @@ Read-only: it never writes to the warehouse, so it is safe to keep open
 while the pipeline runs.
 """
 import datetime as dt
+import pathlib
 
 import altair as alt
 import duckdb
@@ -62,6 +63,20 @@ def time_axis() -> alt.X:
 
 
 st.title("🌦️ Weather ETL Dashboard")
+
+# Cold start (e.g. a fresh cloud deployment): build the warehouse by running
+# the pipeline once, so the dashboard is self-contained as a live demo.
+if not pathlib.Path(DB_PATH).exists():
+    with st.spinner("First run — executing the ETL pipeline to build the warehouse…"):
+        try:
+            from etl import pipeline
+
+            pipeline.run(tuple(CITY_COLORS), past_days=7, db_path=DB_PATH)
+            load_weather.clear()
+            load_runs.clear()
+        except Exception as e:
+            st.error(f"Pipeline bootstrap failed: {e}")
+            st.stop()
 
 try:
     weather = load_weather()
@@ -157,6 +172,7 @@ with c1:
 
 with c2:
     st.subheader("Daily precipitation (mm)")
+    # ordinal (monthdate) axis: xOffset (grouped bars) needs a discrete scale
     daily = (
         df.assign(date=df["ts"].dt.floor("D"))
         .groupby(["date", "city"], as_index=False)["precipitation_mm"].sum()
@@ -165,7 +181,8 @@ with c2:
         alt.Chart(daily)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
-            x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b", grid=False)),
+            x=alt.X("date:O", timeUnit="monthdate", title=None,
+                    axis=alt.Axis(format="%d %b", labelAngle=0, grid=False)),
             xOffset=alt.XOffset("city:N"),
             y=alt.Y("precipitation_mm:Q", title="mm"),
             color=alt.Color("city:N", scale=city_color_scale(cities), title=None),
